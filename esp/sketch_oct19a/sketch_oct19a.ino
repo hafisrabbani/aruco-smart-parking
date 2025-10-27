@@ -5,24 +5,23 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <HTTPClient.h>
-
+#include <ArduinoJson.h>
 
 // ===========================================
-// KONFIGURASI WIFI DAN HOST
+// KONFIGURASI WIFI (ESP32 SEBAGAI ACCESS POINT)
 // ===========================================
-const char* WIFI_SSID = "SUSILO 7487";
-const char* WIFI_PASS = "12345678";
-String HOST_URL = "http://10.153.53.66:8081";
+const char* AP_SSID = "SMART_PARKING_AP";
+const char* AP_PASS = "12345678";  // Minimal 8 karakter
+
+String HOST_URL = "http://192.168.4.2:8081";  // IP laptop/host (cek via ipconfig)
 
 // ===========================================
 // KONFIGURASI PIN
 // ===========================================
 const int SERVO_IN_PIN = 16;
 const int SERVO_OUT_PIN = 17;
-
 const int TRIG_IN_PIN = 5;
 const int ECHO_IN_PIN = 18;
-
 const int TRIG_OUT_PIN = 19;
 const int ECHO_OUT_PIN = 21;
 
@@ -52,6 +51,15 @@ Servo gateOutServo;
 WebServer server(80);
 
 // ===========================================
+// VARIABEL DATA KAPASITAS
+// ===========================================
+int maxCapacity = 0;
+int currentCapacity = 0;
+int availableCapacity = 0;
+unsigned long lastRefresh = 0;
+const unsigned long REFRESH_INTERVAL = 2000;  // 30 detik
+
+// ===========================================
 // FUNGSI UMUM
 // ===========================================
 long measureDistance(int trigPin, int echoPin) {
@@ -72,110 +80,121 @@ void moveServo(Servo& servo, int angle) {
 }
 
 // ===========================================
-// FUNGSI DISPLAY OLED
+// FUNGSI DISPLAY
 // ===========================================
-void displayReady(const char* status = "READY") {
+void displayCapacity() {
   display.clearDisplay();
-  display.setTextSize(2);
+  display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(10, 10);
+  display.setCursor(0, 0);
   display.println("SMART PARKING");
   display.setTextSize(2);
-  display.setCursor(25, 40);
-  display.print(status);
+  display.setCursor(0, 20);
+  display.printf("Tersedia: %d", availableCapacity);
+  display.display();
+}
+
+void displayError(const char* msg) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 20);
+  display.println(msg);
   display.display();
 }
 
 // ===========================================
-// FUNGSI BUKA / TUTUP PALANG BERDASARKAN SENSOR
+// FUNGSI AMBIL DATA KAPASITAS (PAKAI JSON PARSING)
 // ===========================================
-void openGate(Servo& servo, int trigPin, int echoPin, bool isEntrance) {
-  Serial.println(isEntrance ? "[MASUK] Membuka palang..." : "[KELUAR] Membuka palang...");
-  moveServo(servo, OPEN_ANGLE);  // Buka palang
+bool fetchCapacityOnce() {
+  HTTPClient http;
+  String url = HOST_URL + "/capacity";
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
 
-  bool carDetected = false;
-  bool wasDetected = false;
-  unsigned long detectionStart = millis();
-  unsigned long timeout = detectionStart + 20000; // Batas waktu 20 detik
+  String body = "{\"parking_lot\": \"A1\"}";
+  int httpCode = http.POST(body);
 
-  Serial.println("[INFO] Menunggu objek terdeteksi...");
+  if (httpCode == 200) {
+    String payload = http.getString();
+    Serial.println("[CAPACITY] Response: " + payload);
 
-  // Loop sampai sensor mendeteksi objek
-  while (true) {
-    long distance = measureDistance(trigPin, echoPin);
+    StaticJsonDocument<256> doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (!err) {
+      JsonObject data = doc["data"];
+      maxCapacity = data["max_capacity"] | 0;
+      currentCapacity = data["current_capacity"] | 0;
+      availableCapacity = data["available_capacity"] | 0;
 
-    // Log jarak setiap 300ms biar ga terlalu spam
-    static unsigned long lastLog = 0;
-    if (millis() - lastLog > 300) {
-      Serial.print("[DEBUG] Jarak sensor: ");
-      Serial.print(distance);
-      Serial.println(" cm");
-      lastLog = millis();
-    }
+      Serial.printf("[PARSE] Max: %d, Current: %d, Available: %d\n",
+                    maxCapacity, currentCapacity, availableCapacity);
 
-    // Jika objek terdeteksi
-    if (distance < DETECTION_DISTANCE_CM) {
-      if (!wasDetected) {
-        Serial.println("[DETEKSI] Objek terdeteksi di depan sensor!");
-        wasDetected = true;
-        carDetected = true;
-      }
+      displayCapacity();
+      http.end();
+      return true;
     } else {
-      if (wasDetected) {
-        Serial.println("[INFO] Objek sudah menjauh, menutup palang...");
-
-        // ===========================
-        // Kirim HTTP POST ke API kamera
-        // ===========================
-        HTTPClient http;
-        String url = HOST_URL + "/active";
-        Serial.print("[HTTP] Mengirim POST ke: ");
-        Serial.println(url);
-
-        http.begin(url);
-        http.addHeader("Content-Type", "application/json");
-
-        int httpCode = http.POST("{}");
-        if (httpCode > 0) {
-          Serial.printf("[HTTP] Response code: %d\n", httpCode);
-          String payload = http.getString();
-          Serial.println("[HTTP] Response body: " + payload);
-        } else {
-          Serial.printf("[HTTP] Gagal kirim: %s\n", http.errorToString(httpCode).c_str());
-        }
-        http.end();
-        // ===========================
-
-        break;
-      }
+      Serial.println("[JSON] Gagal parsing JSON");
     }
-
-    // Timeout (jaga-jaga kalau sensor rusak / tidak mendeteksi apa pun)
-    if (millis() > timeout) {
-      Serial.println("[TIMEOUT] Tidak ada deteksi dalam 20 detik, menutup palang otomatis...");
-      break;
-    }
-
-    // Pastikan server tetap jalan
-    server.handleClient();
-    delay(100);
+  } else {
+    Serial.printf("[CAPACITY] Gagal request (%d)\n", httpCode);
   }
 
-  // Tutup palang
-  moveServo(servo, CLOSE_ANGLE);
-  delay(500);
+  http.end();
+  return false;
+}
 
-  // Tampilkan di OLED kalau kamu pakai displayReady()
-  displayReady();
-
-  if (carDetected) {
-    Serial.println(isEntrance ? "[MASUK] Mobil terdeteksi, palang ditutup." : "[KELUAR] Mobil terdeteksi, palang ditutup.");
-  } else {
-    Serial.println("[INFO] Tidak ada mobil, palang ditutup otomatis.");
+void fetchCapacityWithRetry() {
+  while (true) {
+    if (fetchCapacityOnce()) break;  // Berhasil, keluar dari loop
+    displayError("Gagal ambil data!");
+    delay(1000);  // Coba lagi tiap 1 detik
   }
 }
 
+// ===========================================
+// FUNGSI BUKA / TUTUP PALANG
+// ===========================================
+void openGate(Servo& servo, int trigPin, int echoPin, bool isEntrance) {
+  Serial.println(isEntrance ? "[MASUK] Membuka palang..." : "[KELUAR] Membuka palang...");
+  moveServo(servo, OPEN_ANGLE);
 
+  bool wasDetected = false;
+  unsigned long detectionStart = millis();
+  unsigned long timeout = detectionStart + 20000;
+
+  while (true) {
+    long distance = measureDistance(trigPin, echoPin);
+    if (distance < DETECTION_DISTANCE_CM) {
+      wasDetected = true;
+    } else if (wasDetected) {
+      Serial.println("[INFO] Objek menjauh, menutup palang...");
+
+      // Kirim HTTP POST ke API /active
+      HTTPClient http;
+      String url = HOST_URL + "/active";
+      http.begin(url);
+      http.addHeader("Content-Type", "application/json");
+      int httpCode = http.POST("{}");
+      Serial.printf("[HTTP] Code: %d\n", httpCode);
+      http.end();
+
+      // ✅ Segera fetch ulang data kapasitas setelah kendaraan lewat
+      fetchCapacityWithRetry();
+      break;
+    }
+
+    if (millis() > timeout) break;
+    server.handleClient();
+    fetchCapacityWithRetry();
+    delay(100);
+  }
+
+  fetchCapacityWithRetry();
+  moveServo(servo, CLOSE_ANGLE);
+  // ✅ Tampilkan data terbaru setelah menutup palang
+  displayCapacity();
+}
 
 // ===========================================
 // HANDLER API
@@ -191,7 +210,7 @@ void handleOpenExit() {
 }
 
 void handleStatus() {
-  String json = "{\"status\":\"ready\",\"info\":\"Sistem aktif, slot tidak terbatas\"}";
+  String json = "{\"status\":\"ready\",\"info\":\"ESP32 sebagai Access Point\"}";
   server.send(200, "application/json", json);
 }
 
@@ -200,42 +219,34 @@ void handleStatus() {
 // ===========================================
 void setup() {
   Serial.begin(115200);
-
   pinMode(TRIG_IN_PIN, OUTPUT);
   pinMode(ECHO_IN_PIN, INPUT);
   pinMode(TRIG_OUT_PIN, OUTPUT);
   pinMode(ECHO_OUT_PIN, INPUT);
 
-  // WiFi Connect
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Serial.print("Menghubungkan ke WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\nTerhubung ke WiFi!");
-  Serial.print("IP Address: ");
-  Serial.println(WiFi.localIP());
+  Serial.println("Membuat Access Point...");
+  WiFi.softAP(AP_SSID, AP_PASS);
 
-  // OLED
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("Access Point aktif. IP ESP32: ");
+  Serial.println(IP);
+
   Wire.begin(OLED_SDA, OLED_SCL);
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println("Gagal inisialisasi OLED");
-    while (true);
+    while (true)
+      ;
   }
 
-  // Servo
-  gateInServo.setPeriodHertz(50);
-  gateInServo.attach(SERVO_IN_PIN, 500, 2400);
+  gateInServo.attach(SERVO_IN_PIN);
+  gateOutServo.attach(SERVO_OUT_PIN);
   gateInServo.write(CLOSE_ANGLE);
-
-  gateOutServo.setPeriodHertz(50);
-  gateOutServo.attach(SERVO_OUT_PIN, 500, 2400);
   gateOutServo.write(CLOSE_ANGLE);
 
-  displayReady();
+  // Ambil kapasitas pertama kali (auto retry sampai sukses)
+  fetchCapacityWithRetry();
+  lastRefresh = millis();
 
-  // Routing
   server.on("/buka_masuk", HTTP_POST, handleOpenEntrance);
   server.on("/buka_keluar", HTTP_POST, handleOpenExit);
   server.on("/status", HTTP_GET, handleStatus);
@@ -249,4 +260,12 @@ void setup() {
 // ===========================================
 void loop() {
   server.handleClient();
+
+  unsigned long now = millis();
+  if (now - lastRefresh > REFRESH_INTERVAL) {
+    if (!fetchCapacityOnce()) {
+      Serial.println("[INFO] Gagal refresh periodik, skip dan tunggu 30 detik berikutnya");
+    }
+    lastRefresh = now;
+  }
 }

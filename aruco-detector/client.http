@@ -1,0 +1,6 @@
+POST http://localhost:8081/capacity
+Content-Type: application/json
+
+{
+  "parking_lot": "A1"
+}

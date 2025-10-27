@@ -73,6 +73,14 @@
                 @endforelse
                 </tbody>
             </table>
+            <br>
+            <form action="{{ route('admin.parking.reset') }}" method="POST" onsubmit="return confirm('Yakin ingin menghapus semua data parkir?');">
+                @csrf
+                <button type="submit"
+                        class="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 transition">
+                    Reset Data
+                </button>
+            </form>
         </div>
     </div>
 @endsection

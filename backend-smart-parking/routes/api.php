@@ -8,3 +8,5 @@ use App\Http\Controllers\API\EntryGateController;
 //})->middleware('auth:sanctum');
 
 Route::post('/entry-gate', [EntryGateController::class, 'entryGate'])->name('entryGate');
+Route::post('/exit-gate', [EntryGateController::class, 'exitGate'])->name('exitGate');
+Route::get('/capacity', [EntryGateController::class, 'getCapcity'])->name('capacity');

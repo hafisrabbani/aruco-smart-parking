@@ -34,4 +34,10 @@ class ParkingController extends Controller
             'end_date' => $request->end_date,
         ]);
     }
+
+    public function resetData()
+    {
+        Parking::truncate();
+        return redirect()->route('admin.parking.index')->with('success', 'All parking data has been reset.');
+    }
 }

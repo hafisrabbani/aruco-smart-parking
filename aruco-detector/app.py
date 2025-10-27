@@ -12,8 +12,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # KONFIGURASI
 # =====================================
 API_HOST = "http://127.0.0.1:8000"
-API_DEVICE = "http://10.153.53.232"
+API_DEVICE = "http://192.168.4.1"
 API_ENTRY_GATE = f"{API_HOST}/api/entry-gate"
+API_EXIT_GATE = f"{API_HOST}/api/exit-gate"
+API_CAPACITY = f"{API_HOST}/api/capacity"
 HTTP_SERVER_PORT = 8081  # Port untuk menerima request dari alat
 
 
@@ -23,32 +25,51 @@ HTTP_SERVER_PORT = 8081  # Port untuk menerima request dari alat
 class SimpleRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path
-        content_length = int(self.headers.get('Content-Length', 0))
+        content_length = int(self.headers.get("Content-Length", 0))
         post_data = self.rfile.read(content_length or 0)
+
+        # ✅ Pastikan data selalu terdefinisi
+        data = {}
         tag_id = None
 
         try:
             if post_data:
-                data = json.loads(post_data)
-                tag_id = data.get("id")
+                try:
+                    data = json.loads(post_data)
+                    tag_id = data.get("id")
+                except json.JSONDecodeError:
+                    print("[HTTP] Body bukan JSON valid, abaikan.")
 
-            if path == "/":  # endpoint default
+            if path == "/":
                 print(f"[HTTP] Diterima ID dari alat: {tag_id}")
                 if hasattr(self.server, "app"):
                     self.server.app.root.after(0, self.server.app.handle_external_request, tag_id)
                 self._send_json({"status": "ok", "action": "received_id"})
 
-            elif path == "/active":  # endpoint untuk aktifkan kamera
+            elif path == "/active":
                 print("[HTTP] Perintah mengaktifkan kamera diterima.")
                 if hasattr(self.server, "app"):
                     self.server.app.root.after(0, self.server.app.activate_camera_from_api)
                 self._send_json({"status": "ok", "action": "camera_activated"})
+
+            elif path == "/capacity":
+                print("[HTTP] Meneruskan request ke API kapasitas...")
+                try:
+                    # ✅ Ganti GET ke POST (lebih cocok untuk kirim JSON)
+                    api_response = requests.get(f"{API_HOST}/api/capacity", json=data, timeout=5)
+                    response_json = api_response.json()
+                    print("[CAPACITY] Response:", response_json)
+                    self._send_json(response_json, api_response.status_code)
+                except Exception as e:
+                    print("[CAPACITY] Gagal menghubungi API:", e)
+                    self._send_json({"error": str(e)}, 500)
 
             else:
                 self._send_json({"error": f"Endpoint {path} tidak dikenal"}, 404)
 
         except Exception as e:
             self._send_json({"error": str(e)}, 400)
+
 
     def _send_json(self, data, code=200):
         self.send_response(code)
@@ -75,15 +96,20 @@ def start_http_server(app, port=HTTP_SERVER_PORT):
 class ArucoApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("ArUco Detector")
-        self.root.geometry("900x700")
+        self.root.title("ArUco Detector - Gate System")
+        self.root.geometry("900x750")
 
+        # Dropdown kamera
         self.available_cams = self.detect_cameras()
         self.selected_cam = StringVar(value=self.available_cams[0][0] if self.available_cams else "0")
-
         cam_names = [f"{idx} - {name}" for idx, name in self.available_cams]
         self.cam_menu = OptionMenu(root, self.selected_cam, *cam_names)
         self.cam_menu.pack(pady=5)
+
+        # Dropdown mode (Entry / Exit)
+        self.mode_var = StringVar(value="entry")
+        mode_menu = OptionMenu(root, self.mode_var, "entry", "exit")
+        mode_menu.pack(pady=5)
 
         self.start_button = Button(root, text="Restart Camera", command=self.start_camera)
         self.start_button.pack(pady=5)
@@ -128,7 +154,6 @@ class ArucoApp:
 
     def start_camera(self):
         cam_index = int(self.selected_cam.get().split(" - ")[0]) if " - " in self.selected_cam.get() else int(self.selected_cam.get())
-
         if self.cap and self.cap.isOpened():
             self.cap.release()
 
@@ -137,7 +162,7 @@ class ArucoApp:
             self.status_label.config(text=f"Kamera {cam_index} tidak bisa diakses")
             return
 
-        self.status_label.config(text=f"Kamera {cam_index} aktif. Cari marker...")
+        self.status_label.config(text=f"Kamera {cam_index} aktif. Mode: {self.mode_var.get().upper()}")
         self.welcome_label.config(text="")
         self.last_ids = None
         self.scanning = True
@@ -184,24 +209,66 @@ class ArucoApp:
             self.root.after(10, self.update_frame)
 
     def handle_marker_detected(self, tag_id):
-        """Kirim data marker dan matikan kamera sementara"""
+        """Kirim data marker sesuai mode"""
+        mode = self.mode_var.get()
+        api_url = API_ENTRY_GATE if mode == "entry" else API_EXIT_GATE
+        gate_action = "/buka_masuk" if mode == "entry" else "/buka_keluar"
+
         try:
-            print(f"[API] Mengirim ke {API_ENTRY_GATE} dengan id {tag_id}")
-            clients = requests.post(API_ENTRY_GATE, json={"id": tag_id}, timeout=5)
-            print("Api response : ", clients.status_code, clients.text)
-            if clients.status_code == 200:
-                data = clients.json()
+            print(f"[API] Mode {mode.upper()} - Kirim ke {api_url} dengan id {tag_id}")
+            response = requests.post(api_url, json={"id": tag_id}, timeout=5)
+            print("API Response:", response.status_code, response.text)
+
+            # Jika sukses (200)
+            if response.status_code == 200:
+                data = response.json()
                 user_data = data.get("data") or data.get("user") or {}
                 name = user_data.get("name", "Tidak diketahui")
-                self.welcome_label.config(text=f"Selamat datang, {name}!")
+                self.welcome_label.config(
+                    text=f"{'Selamat datang' if mode == 'entry' else 'Sampai jumpa'}, {name}!"
+                )
                 self.status_label.config(text=f"User: {name} (Tag ID: {tag_id})")
-                gate_client = requests.post(API_DEVICE+"/buka_masuk", json={}, timeout=5)
+
+                gate_client = requests.post(API_DEVICE + gate_action, json={}, timeout=5)
                 print("Response buka gate:", gate_client.status_code, gate_client.text)
+
+            # Jika error 400 dengan "User is already parked in"
+            elif response.status_code == 400:
+                data = response.json()
+                msg = data.get("message", "").lower()
+                if data.get("status") == "error" and "already parked in" in msg:
+                    self.status_label.config(text="❌ User sudah parkir di dalam.")
+                    self.welcome_label.config(text="")
+                    print("[INFO] User sudah parkir di dalam. Kamera akan aktif lagi.")
+                    self.root.after(2000, self.start_camera)  # aktifkan ulang kamera setelah 2 detik
+                    return
+                else:
+                    self.status_label.config(text=f"Error 400: {data.get('message', 'Unknown error')}")
+                    self.welcome_label.config(text="")
+                    self.root.after(2000, self.start_camera)
+                    return
+
+            # Jika parking penuh
+            elif mode == "entry" and response.status_code == 403:
+                data = response.json()
+                message = data.get("message", "Parking is full")
+                if data.get("status") == "error" and "full" in message.lower():
+                    self.status_label.config(text="Gagal masuk: Parking is full ❌")
+                    self.welcome_label.config(text="")
+                    print("[INFO] Parking penuh. Tidak lanjut proses.")
+                    self.root.after(2000, self.start_camera)
+                    return
+
             else:
+                self.status_label.config(text=f"Gagal: HTTP {response.status_code}")
                 self.welcome_label.config(text="")
-                self.status_label.config(text=f"Gagal: HTTP {clients.status_code}")
+                self.root.after(2000, self.start_camera)
+
         except Exception as e:
             print("Gagal kirim data marker:", e)
+            self.status_label.config(text=f"Error: {e}")
+            self.root.after(2000, self.start_camera)
+
         finally:
             self.root.after(0, self.stop_camera)
 

@@ -39,5 +39,6 @@ Route::prefix('admin')->group(function () {
         Route::get('/parking', [ParkingController::class, 'index'])->name('admin.parking.index');
         Route::get('/users', [UserManagementController::class, 'index'])->name('admin.users.index');
         Route::get('/report', [ReportController::class, 'index'])->name('admin.report.index');
+        Route::post('/parking/reset', [ParkingController::class, 'resetData'])->name('admin.parking.reset');
     });
 });
